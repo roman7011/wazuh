@@ -390,4 +390,78 @@ TEST_F(ReflectiveJsonTest, NumericBufferZeroing)
     EXPECT_EQ(json.front(), '{');
     EXPECT_EQ(json.back(), '}');
 }
+
+// Regression tests for wazuh/wazuh#35251: agent.host.ip missing when other Host
+// fields (architecture, hostname, os) are empty.
+// The isEmpty() function for reflectable structs must return false when at least
+// one field has a value, so that partially-populated nested objects are not
+// silently dropped from the serialized output.
+
+TEST_F(ReflectiveJsonTest, IsEmptyReturnsFalseForPartiallyPopulatedNestedStruct)
+{
+    struct NestedData
+    {
+        std::string_view stringField;
+        int64_t intField;
+
+        REFLECTABLE(MAKE_FIELD("stringField", &NestedData::stringField),
+                    MAKE_FIELD("intField", &NestedData::intField));
+    };
+
+    // Only stringField is set; intField is at its sentinel (empty) value.
+    NestedData obj;
+    obj.stringField = "someValue";
+    obj.intField    = DEFAULT_INT_VALUE;
+
+    EXPECT_FALSE(isEmpty(obj));
+}
+
+TEST_F(ReflectiveJsonTest, IsEmptyReturnsTrueWhenAllFieldsAreEmpty)
+{
+    struct NestedData
+    {
+        std::string_view stringField;
+        int64_t intField;
+
+        REFLECTABLE(MAKE_FIELD("stringField", &NestedData::stringField),
+                    MAKE_FIELD("intField", &NestedData::intField));
+    };
+
+    NestedData obj;
+    obj.stringField = "";
+    obj.intField    = DEFAULT_INT_VALUE;
+
+    EXPECT_TRUE(isEmpty(obj));
+}
+
+TEST_F(ReflectiveJsonTest, PartiallyPopulatedNestedStructIsNotOmittedFromOutput)
+{
+    // When a nested reflectable struct has only SOME fields populated,
+    // serializeToJSON must emit the object with only those non-empty fields.
+    struct NestedData
+    {
+        std::string_view stringField;
+        int64_t intField;
+
+        REFLECTABLE(MAKE_FIELD("stringField", &NestedData::stringField),
+                    MAKE_FIELD("intField", &NestedData::intField));
+    };
+
+    TestData<NestedData> obj;
+    obj.fieldOne              = "";
+    obj.fieldTwo              = DEFAULT_INT_VALUE;
+    obj.fieldThree.stringField = "someValue";
+    obj.fieldThree.intField   = DEFAULT_INT_VALUE;
+
+    std::string json;
+    serializeToJSON(obj, json);
+
+    // Outer fields that are empty must be absent.
+    EXPECT_EQ(json.find(R"("fieldOne":)"), std::string::npos);
+    EXPECT_EQ(json.find(R"("fieldTwo":)"), std::string::npos);
+
+    // fieldThree is not empty (stringField has a value) and must appear, containing
+    // only its non-empty sub-field.
+    EXPECT_NE(json.find(R"("fieldThree":{"stringField":"someValue"})"), std::string::npos);
+}
 #endif
