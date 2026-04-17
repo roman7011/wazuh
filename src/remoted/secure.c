@@ -921,6 +921,13 @@ STATIC void HandleSecureMessage(const message_t *message, w_indexed_queue_t * co
     os_strdup(keys.keyentries[agentid]->name, agent_name);
     os_strdup(keys.keyentries[agentid]->ip->ip, agent_ip);
 
+    /* If the agent registered with "any" IP, use the actual source IP of the message
+     * so that downstream consumers (e.g. inventory harvester) can populate agent.host.ip */
+    if (strcmp(agent_ip, "any") == 0 && srcip[0] != '\0') {
+        os_free(agent_ip);
+        os_strdup(srcip, agent_ip);
+    }
+
     key_unlock();
 
     if (sock_idle >= 0) {
