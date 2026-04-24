@@ -10,6 +10,15 @@
  */
 
 #include "wmodules.h"
+#include "time_op.h"
+
+#ifdef WIN32
+#include <windows.h>
+#else
+extern char **environ;
+#endif
+
+static cJSON *wm_command_build_env_vars(void);
 
 #ifdef WIN32
 static DWORD WINAPI wm_command_main(void *arg);             // Module main function. It won't return
@@ -19,6 +28,66 @@ static void * wm_command_main(wm_command_t * command);    // Module main functio
 static void wm_command_destroy(wm_command_t * command);   // Destroy data
 cJSON *wm_command_dump(const wm_command_t * command);
 int validate_command_checksums(wm_command_t * command, const char * full_path); // Validate checksums
+
+static cJSON *wm_command_build_env_vars(void) {
+    cJSON *env_vars = cJSON_CreateObject();
+
+    if (!env_vars) {
+        return NULL;
+    }
+
+#ifdef WIN32
+    LPCH env_block = GetEnvironmentStringsA();
+    if (!env_block) {
+        return env_vars;
+    }
+
+    for (LPCH var = env_block; *var; var += strlen(var) + 1) {
+        char *eq = strchr(var, '=');
+        if (!eq || eq == var) {
+            continue;
+        }
+
+        const size_t keylen = (size_t)(eq - var);
+        char *key = NULL;
+        os_malloc(keylen + 1, key);
+        memcpy(key, var, keylen);
+        key[keylen] = '\0';
+
+        if (!cJSON_GetObjectItemCaseSensitive(env_vars, key)) {
+            cJSON_AddStringToObject(env_vars, key, eq + 1);
+        }
+
+        os_free(key);
+    }
+
+    FreeEnvironmentStringsA(env_block);
+#else
+    if (environ) {
+        for (char **e = environ; *e; ++e) {
+            const char *entry = *e;
+            const char *eq = strchr(entry, '=');
+            if (!eq || eq == entry) {
+                continue;
+            }
+
+            const size_t keylen = (size_t)(eq - entry);
+            char *key = NULL;
+            os_malloc(keylen + 1, key);
+            memcpy(key, entry, keylen);
+            key[keylen] = '\0';
+
+            if (!cJSON_GetObjectItemCaseSensitive(env_vars, key)) {
+                cJSON_AddStringToObject(env_vars, key, eq + 1);
+            }
+
+            os_free(key);
+        }
+    }
+#endif
+
+    return env_vars;
+}
 
 // Command module context definition
 
@@ -99,9 +168,10 @@ void * wm_command_main(wm_command_t * command) {
 
     // Set extended tag
 
-    extag_len = strlen(WM_COMMAND_CONTEXT.name) + strlen(command->tag) + 2;
+    // Keep a stable routing tag for all command events.
+    extag_len = strlen(WM_COMMAND_CONTEXT.name) + 1;
     os_malloc(extag_len * sizeof(char), extag);
-    snprintf(extag, extag_len, "%s_%s", WM_COMMAND_CONTEXT.name, command->tag);
+    snprintf(extag, extag_len, "%s", WM_COMMAND_CONTEXT.name);
 
     if (wm_state_io(extag, WM_IO_READ, &command->state, sizeof(command->state)) < 0) {
         memset(&command->state, 0, sizeof(command->state));
@@ -152,6 +222,8 @@ void * wm_command_main(wm_command_t * command) {
 
         int status = 0;
         char *output = NULL;
+        char event_start[32] = {0};
+        get_iso8601_utc_time(event_start, sizeof(event_start));
         switch (wm_exec(command->full_command, command->ignore_output ? NULL : &output, &status, command->timeout, NULL)) {
         case 0:
             if (status > 0) {
@@ -171,18 +243,352 @@ void * wm_command_main(wm_command_t * command) {
             break;
         }
 
-        if (!command->ignore_output && output != NULL) {
-            char *line;
-            char *save_ptr = NULL;
-            for (line = strtok_r(output, "\n", &save_ptr); line; line = strtok_r(NULL, "\n", &save_ptr)){
-            #ifdef WIN32
-                wm_sendmsg(usec, 0, line, extag, LOCALFILE_MQ);
-            #else
-                wm_sendmsg(usec, command->queue_fd, line, extag, LOCALFILE_MQ);
-            #endif
+        if (!command->ignore_output) {
+            cJSON *json_event = NULL;
+            char *json_payload = NULL;
+            const char *raw_output = output ? output : "";
+            const char *payload_output = raw_output;
+            char *truncated_output = NULL;
+            const size_t header_len = 3 + strlen(extag); // "1:" + extag + ":"
+            const size_t max_message_len = header_len < OS_MAXSTR ? (OS_MAXSTR - header_len - 1) : 0;
+
+            // Best-effort process details.
+            const char *command_line = command->full_command ? command->full_command : "";
+            char *command_line_cpy = NULL;
+            char **proc_argv = NULL;
+            const char *proc_argv0 = "";
+            char *tmp_full_path = NULL;
+            const char *proc_path = full_path ? full_path : "";
+            const char *proc_name = "";
+
+            if (command_line[0]) {
+                command_line_cpy = strdup(command_line);
+                if (command_line_cpy) {
+                    proc_argv = w_strtok(command_line_cpy);
+                    if (proc_argv && proc_argv[0]) {
+                        proc_argv0 = proc_argv[0];
+                    }
+                }
             }
 
-            os_free(output);
+            if (!full_path && proc_argv0 && proc_argv0[0]) {
+                if (get_binary_path(proc_argv0, &tmp_full_path) != OS_INVALID) {
+                    proc_path = tmp_full_path;
+                }
+            }
+
+            if (proc_path && proc_path[0]) {
+                const char *slash = strrchr(proc_path, '/');
+                proc_name = slash ? (slash + 1) : proc_path;
+            } else if (proc_argv0 && proc_argv0[0]) {
+                const char *slash = strrchr(proc_argv0, '/');
+                proc_name = slash ? (slash + 1) : proc_argv0;
+            }
+
+            bool include_env_vars = true;
+            bool env_vars_dropped = false;
+            cJSON *captured_env_vars = NULL;
+            size_t base_json_len = 0;
+
+rebuild_event_payload:
+            if (captured_env_vars) {
+                cJSON_Delete(captured_env_vars);
+                captured_env_vars = NULL;
+            }
+
+            if (include_env_vars) {
+                captured_env_vars = wm_command_build_env_vars();
+            }
+
+            // Reset payload/truncation state on rebuild.
+            os_free(truncated_output);
+            truncated_output = NULL;
+            payload_output = raw_output;
+            os_free(json_payload);
+            json_payload = NULL;
+            base_json_len = 0;
+
+            // Compute JSON overhead with all fields except output content.
+            {
+                cJSON *base_event = cJSON_CreateObject();
+                char *base_payload = NULL;
+
+                if (base_event) {
+                    cJSON *process = NULL;
+                    cJSON *process_args = NULL;
+                    cJSON *process_io = NULL;
+
+                    cJSON_AddStringToObject(base_event, "event.module", "wazuh-woodle-cmd");
+                    cJSON_AddStringToObject(base_event, "event.start", event_start);
+                    if (command->tag) {
+                        cJSON_AddStringToObject(base_event, "tags", command->tag);
+                    }
+
+                    process = cJSON_AddObjectToObject(base_event, "process");
+                    if (process) {
+                        process_args = cJSON_AddArrayToObject(process, "args");
+                        if (process_args && proc_argv) {
+                            for (size_t i = 1; proc_argv[i]; ++i) {
+                                cJSON_AddItemToArray(process_args, cJSON_CreateString(proc_argv[i]));
+                            }
+                        }
+
+                        cJSON_AddStringToObject(process, "name", proc_name ? proc_name : "");
+                        cJSON_AddStringToObject(process, "path", proc_path ? proc_path : "");
+                        cJSON_AddStringToObject(process, "command_line", command_line);
+
+                        if ((command->md5_hash && command->md5_hash[0]) || (command->sha1_hash && command->sha1_hash[0]) ||
+                            (command->sha256_hash && command->sha256_hash[0])) {
+                            cJSON *hash = cJSON_AddObjectToObject(process, "hash");
+
+                            if (hash) {
+                                if (command->md5_hash && command->md5_hash[0]) {
+                                    cJSON_AddStringToObject(hash, "md5", command->md5_hash);
+                                }
+                                if (command->sha1_hash && command->sha1_hash[0]) {
+                                    cJSON_AddStringToObject(hash, "sha1", command->sha1_hash);
+                                }
+                                if (command->sha256_hash && command->sha256_hash[0]) {
+                                    cJSON_AddStringToObject(hash, "sha256", command->sha256_hash);
+                                }
+                            }
+                        }
+
+                        if (include_env_vars) {
+                            cJSON *process_env_vars = captured_env_vars ? cJSON_Duplicate(captured_env_vars, 1) : cJSON_CreateObject();
+                            if (process_env_vars) {
+                                cJSON_AddItemToObject(process, "env_vars", process_env_vars);
+                            }
+                        }
+
+                        cJSON_AddNumberToObject(process, "exit_code", status);
+
+                        process_io = cJSON_AddObjectToObject(process, "io");
+                        if (process_io) {
+                            cJSON_AddStringToObject(process_io, "text", "");
+                        }
+                    }
+                    base_payload = cJSON_PrintUnformatted(base_event);
+                    cJSON_Delete(base_event);
+                }
+
+                if (base_payload) {
+                    base_json_len = strlen(base_payload);
+                    os_free(base_payload);
+                }
+            }
+
+            // Build JSON payload (single event with full output).
+            json_event = cJSON_CreateObject();
+            if (json_event) {
+                cJSON *process = NULL;
+                cJSON *process_args = NULL;
+                cJSON *process_io = NULL;
+
+                cJSON_AddStringToObject(json_event, "event.module", "wazuh-woodle-cmd");
+                cJSON_AddStringToObject(json_event, "event.start", event_start);
+                if (command->tag) {
+                    cJSON_AddStringToObject(json_event, "tags", command->tag);
+                }
+
+                process = cJSON_AddObjectToObject(json_event, "process");
+                if (process) {
+                    process_args = cJSON_AddArrayToObject(process, "args");
+                    if (process_args && proc_argv) {
+                        for (size_t i = 1; proc_argv[i]; ++i) {
+                            cJSON_AddItemToArray(process_args, cJSON_CreateString(proc_argv[i]));
+                        }
+                    }
+
+                    cJSON_AddStringToObject(process, "name", proc_name ? proc_name : "");
+                    cJSON_AddStringToObject(process, "path", proc_path ? proc_path : "");
+                    cJSON_AddStringToObject(process, "command_line", command_line);
+
+                    if ((command->md5_hash && command->md5_hash[0]) || (command->sha1_hash && command->sha1_hash[0]) ||
+                        (command->sha256_hash && command->sha256_hash[0])) {
+                        cJSON *hash = cJSON_AddObjectToObject(process, "hash");
+
+                        if (hash) {
+                            if (command->md5_hash && command->md5_hash[0]) {
+                                cJSON_AddStringToObject(hash, "md5", command->md5_hash);
+                            }
+                            if (command->sha1_hash && command->sha1_hash[0]) {
+                                cJSON_AddStringToObject(hash, "sha1", command->sha1_hash);
+                            }
+                            if (command->sha256_hash && command->sha256_hash[0]) {
+                                cJSON_AddStringToObject(hash, "sha256", command->sha256_hash);
+                            }
+                        }
+                    }
+
+                    if (include_env_vars) {
+                        cJSON *process_env_vars = captured_env_vars ? cJSON_Duplicate(captured_env_vars, 1) : cJSON_CreateObject();
+                        if (process_env_vars) {
+                            cJSON_AddItemToObject(process, "env_vars", process_env_vars);
+                        }
+                    }
+
+                    cJSON_AddNumberToObject(process, "exit_code", status);
+
+                    process_io = cJSON_AddObjectToObject(process, "io");
+                    if (process_io) {
+                        cJSON_AddStringToObject(process_io, "text", payload_output);
+                    }
+                }
+                json_payload = cJSON_PrintUnformatted(json_event);
+                cJSON_Delete(json_event);
+                json_event = NULL;
+            }
+
+            // If the final message could be truncated at the MQ layer, truncate the output and rebuild.
+            if (json_payload && max_message_len > 0 && strlen(json_payload) > max_message_len) {
+                const size_t output_len = strlen(raw_output);
+                size_t allowed_output_len = 0;
+                int attempts = 0;
+
+                if (base_json_len > 0 && max_message_len > base_json_len) {
+                    allowed_output_len = max_message_len - base_json_len;
+                }
+
+                // If even the base event cannot fit, retry without env_vars before dropping the whole event.
+                if (allowed_output_len == 0 && include_env_vars && !env_vars_dropped) {
+                    mtwarn(WM_COMMAND_LOGTAG, "Event is too large. Dropping env_vars and retrying.");
+                    env_vars_dropped = true;
+                    include_env_vars = false;
+                    goto rebuild_event_payload;
+                }
+
+                // Best-effort: keep JSON valid by truncating the output field before encoding.
+                if (allowed_output_len > 0) {
+                    if (allowed_output_len > output_len) {
+                        allowed_output_len = output_len;
+                    }
+
+                    mtwarn(WM_COMMAND_LOGTAG, "Command output is too long to fit in a single message. Truncating.");
+
+                    do {
+                        os_free(truncated_output);
+                        truncated_output = NULL;
+
+                        os_malloc(allowed_output_len + 1, truncated_output);
+                        memcpy(truncated_output, raw_output, allowed_output_len);
+                        truncated_output[allowed_output_len] = '\0';
+                        payload_output = truncated_output;
+
+                        os_free(json_payload);
+                        json_payload = NULL;
+
+                        json_event = cJSON_CreateObject();
+                        if (json_event) {
+                            cJSON *process = NULL;
+                            cJSON *process_args = NULL;
+                            cJSON *process_io = NULL;
+
+                            cJSON_AddStringToObject(json_event, "event.module", "wazuh-woodle-cmd");
+                            cJSON_AddStringToObject(json_event, "event.start", event_start);
+                            if (command->tag) {
+                                cJSON_AddStringToObject(json_event, "tags", command->tag);
+                            }
+
+                            process = cJSON_AddObjectToObject(json_event, "process");
+                            if (process) {
+                                process_args = cJSON_AddArrayToObject(process, "args");
+                                if (process_args && proc_argv) {
+                                    for (size_t i = 1; proc_argv[i]; ++i) {
+                                        cJSON_AddItemToArray(process_args, cJSON_CreateString(proc_argv[i]));
+                                    }
+                                }
+
+                                cJSON_AddStringToObject(process, "name", proc_name ? proc_name : "");
+                                cJSON_AddStringToObject(process, "path", proc_path ? proc_path : "");
+                                cJSON_AddStringToObject(process, "command_line", command_line);
+
+                                if ((command->md5_hash && command->md5_hash[0]) || (command->sha1_hash && command->sha1_hash[0]) ||
+                                    (command->sha256_hash && command->sha256_hash[0])) {
+                                    cJSON *hash = cJSON_AddObjectToObject(process, "hash");
+
+                                    if (hash) {
+                                        if (command->md5_hash && command->md5_hash[0]) {
+                                            cJSON_AddStringToObject(hash, "md5", command->md5_hash);
+                                        }
+                                        if (command->sha1_hash && command->sha1_hash[0]) {
+                                            cJSON_AddStringToObject(hash, "sha1", command->sha1_hash);
+                                        }
+                                        if (command->sha256_hash && command->sha256_hash[0]) {
+                                            cJSON_AddStringToObject(hash, "sha256", command->sha256_hash);
+                                        }
+                                    }
+                                }
+
+                                if (include_env_vars) {
+                                    cJSON *process_env_vars = captured_env_vars ? cJSON_Duplicate(captured_env_vars, 1) : cJSON_CreateObject();
+                                    if (process_env_vars) {
+                                        cJSON_AddItemToObject(process, "env_vars", process_env_vars);
+                                    }
+                                }
+
+                                cJSON_AddNumberToObject(process, "exit_code", status);
+
+                                process_io = cJSON_AddObjectToObject(process, "io");
+                                if (process_io) {
+                                    cJSON_AddStringToObject(process_io, "text", payload_output);
+                                }
+                            }
+                            json_payload = cJSON_PrintUnformatted(json_event);
+                            cJSON_Delete(json_event);
+                            json_event = NULL;
+                        }
+
+                        if (json_payload && strlen(json_payload) <= max_message_len) {
+                            break;
+                        }
+
+                        // Reduce and try again (output escaping may enlarge JSON more than expected)
+                        allowed_output_len /= 2;
+                        attempts++;
+                    } while (allowed_output_len > 0 && attempts < 4);
+
+                    if (json_payload && strlen(json_payload) > max_message_len) {
+                        os_free(json_payload);
+                        json_payload = NULL;
+                    }
+                } else {
+                    mtwarn(WM_COMMAND_LOGTAG, "Command output is too long to fit in a single message. Dropping event.");
+                    os_free(json_payload);
+                    json_payload = NULL;
+                }
+            }
+
+            // If payload still couldn't be generated to fit, retry without env_vars once.
+            if (!json_payload && include_env_vars && !env_vars_dropped) {
+                mtwarn(WM_COMMAND_LOGTAG, "Event could not fit in a single message. Dropping env_vars and retrying.");
+                env_vars_dropped = true;
+                include_env_vars = false;
+                goto rebuild_event_payload;
+            }
+
+            if (json_payload) {
+            #ifdef WIN32
+                wm_sendmsg(usec, 0, json_payload, extag, LOCALFILE_MQ);
+            #else
+                wm_sendmsg(usec, command->queue_fd, json_payload, extag, LOCALFILE_MQ);
+            #endif
+                os_free(json_payload);
+            }
+
+            os_free(truncated_output);
+
+            os_free(tmp_full_path);
+            free_strarray(proc_argv);
+            free(command_line_cpy);
+
+            if (captured_env_vars) {
+                cJSON_Delete(captured_env_vars);
+            }
+
+            if (output) {
+                os_free(output);
+            }
         }
 
         mtdebug1(WM_COMMAND_LOGTAG, "Command '%s' finished.", command->tag);
