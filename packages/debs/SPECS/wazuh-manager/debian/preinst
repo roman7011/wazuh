@@ -5,14 +5,42 @@ set -e
 # configuration variables
 DIR="/var/wazuh-manager"
 WAZUH_TMP_DIR="${DIR}/packages_files/manager_config_files"
+WAZUH_DATA_TMP_DIR="${WAZUH_TMP_DIR}/data_preserve"
+WAZUH_TZDB_TMP_DIR="${WAZUH_TMP_DIR}/tzdb_backup"
 VERSION="$2"
 MAJOR=$(echo "$VERSION" | cut -dv -f2 | cut -d. -f1)
 
 prepare_tmp_dir() {
-    if [ -d "${WAZUH_TMP_DIR}" ]; then
+    if [ -d "${WAZUH_TMP_DIR}" ] && [ ! -f "${WAZUH_TMP_DIR}/rollback_prepared" ]; then
         rm -rf "${WAZUH_TMP_DIR}"
     fi
     mkdir -p "${WAZUH_TMP_DIR}"
+    rm -rf "${WAZUH_DATA_TMP_DIR}"
+}
+
+preserve_data_except_tzdb() {
+    if [ ! -d "${DIR}/data" ]; then
+        return 0
+    fi
+
+    mkdir -p "${WAZUH_DATA_TMP_DIR}"
+
+    for item in "${DIR}"/data/* "${DIR}"/data/.[!.]* "${DIR}"/data/..?*; do
+        [ -e "${item}" ] || [ -L "${item}" ] || continue
+        [ "$(basename "${item}")" = "tzdb" ] && continue
+        cp -a "${item}" "${WAZUH_DATA_TMP_DIR}/"
+    done
+}
+
+backup_tzdb_for_upgrade() {
+    if [ -e "${DIR}/data/tzdb" ] || [ -L "${DIR}/data/tzdb" ]; then
+        rm -rf "${WAZUH_TZDB_TMP_DIR}"
+        mkdir -p "${WAZUH_TMP_DIR}"
+        mv "${DIR}/data/tzdb" "${WAZUH_TZDB_TMP_DIR}"
+        touch "${WAZUH_TMP_DIR}/tzdb_backup_prepared"
+    elif [ -e "${WAZUH_TZDB_TMP_DIR}" ] || [ -L "${WAZUH_TZDB_TMP_DIR}" ]; then
+        touch "${WAZUH_TMP_DIR}/tzdb_backup_prepared"
+    fi
 }
 
 case "$1" in
@@ -89,6 +117,8 @@ EOF
             # environment configuration (original behavior, after hard-block checks)
             prepare_tmp_dir
             touch "${WAZUH_TMP_DIR}/rollback_prepared"
+            preserve_data_except_tzdb
+            backup_tzdb_for_upgrade
 
             if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
                 systemctl stop wazuh-manager.service > /dev/null 2>&1
@@ -158,30 +188,14 @@ EOF
             prepare_tmp_dir
         fi
 
-        if [ ! -z "$2" ] && [ ! -f ${DIR}/etc/wazuh-manager.conf ] ; then
-            touch ${WAZUH_TMP_DIR}/create_conf
-        fi
-
         # Delete old service
         if [ -f /etc/init.d/ossec ]; then
           rm /etc/init.d/ossec
         fi
 
 
-        if [ -f ${DIR}/etc/client.keys ]; then
-            cp -p ${DIR}/etc/client.keys ${WAZUH_TMP_DIR}/client.keys
-        fi
-
-        if [ -f ${DIR}/etc/wazuh-manager-internal-options.conf ]; then
-            cp -p ${DIR}/etc/wazuh-manager-internal-options.conf ${WAZUH_TMP_DIR}/wazuh-manager-internal-options.conf
-        fi
-
         if [ -f ${DIR}/etc/wazuh-manager.conf ]; then
             cp -p ${DIR}/etc/wazuh-manager.conf ${WAZUH_TMP_DIR}/wazuh-manager.conf
-        fi
-
-        if [ -d ${DIR}/etc/shared ]; then
-            cp -rp ${DIR}/etc/shared ${WAZUH_TMP_DIR}/group
         fi
 
         if [ -d ${DIR}/var/db/agents ]; then

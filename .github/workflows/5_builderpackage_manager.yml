@@ -157,6 +157,7 @@ jobs:
       - name: Set tag and container name
         run: |
           VERSION="$(grep '"version"' $GITHUB_WORKSPACE/VERSION.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+          echo "WAZUH_VERSION=$VERSION" >> $GITHUB_ENV
           if [ "${{ inputs.docker_image_tag }}" == "auto" ]; then echo "TAG=$VERSION" >> $GITHUB_ENV;
           elif [ "${{ inputs.docker_image_tag }}" == "developer" ]; then echo "TAG=$(sed 's|[/\]|--|g' <<< ${{ github.ref_name }})" >> $GITHUB_ENV;
           else echo "TAG=${{ inputs.docker_image_tag }}" >> $GITHUB_ENV; fi
@@ -365,6 +366,17 @@ jobs:
             docker exec wazuh_previous bash -lc "$INSTALL_CMD"
           docker exec wazuh_previous bash -c "/var/wazuh-manager/bin/wazuh-manager-control info || echo 'Manager not started yet'"
 
+      - name: Prepare manager upgrade preservation rules test
+        if: env.HAS_PREVIOUS_RELEASE == 'true'
+        uses: ./.github/actions/5_builderpackage_manager-upgrade-rules-test
+        with:
+          container_name: wazuh_previous
+          mode: prepare
+          system: ${{ inputs.system }}
+          package_name: ${{ env.PACKAGE_NAME }}
+          package_path: /packages
+          expected_version: ${{ env.WAZUH_VERSION }}
+
       - name: Upgrade to current Wazuh version
         if: env.HAS_PREVIOUS_RELEASE == 'true'
         timeout-minutes: 20
@@ -384,6 +396,88 @@ jobs:
             --label "Upgrade manager package in test container" -- \
             docker exec wazuh_previous bash -lc "$INSTALL_CMD"
           docker exec wazuh_previous bash -c "/var/wazuh-manager/bin/wazuh-manager-control info || echo 'Manager not started yet after upgrade'"
+
+      - name: Validate manager upgrade preservation rules test
+        if: env.HAS_PREVIOUS_RELEASE == 'true'
+        uses: ./.github/actions/5_builderpackage_manager-upgrade-rules-test
+        with:
+          container_name: wazuh_previous
+          mode: validate
+          system: ${{ inputs.system }}
+          package_name: ${{ env.PACKAGE_NAME }}
+          package_path: /packages
+          expected_version: ${{ env.WAZUH_VERSION }}
+
+      - name: Run container and install current wazuh-manager for self-upgrade
+        if: env.HAS_PREVIOUS_RELEASE == 'false'
+        timeout-minutes: 20
+        run: |
+          FILE_NAME=${{ env.PACKAGE_NAME }}
+          SYSTEM=${{ inputs.system }}
+
+          if [ "$SYSTEM" = "deb" ]; then
+            BASE_IMAGE="ubuntu:22.04"
+            INSTALL_CMD="dpkg -i /packages/$FILE_NAME || apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 -f install -y"
+            UPDATE_CMD="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update"
+            docker run --name wazuh_previous -d -v /tmp:/packages $BASE_IMAGE tail -f /dev/null
+            sleep 5
+          else
+            BASE_IMAGE="centos:8"
+            INSTALL_CMD="yum --setopt=retries=5 --setopt=timeout=30 localinstall -y /packages/$FILE_NAME"
+            UPDATE_CMD="yum --setopt=retries=5 --setopt=timeout=30 update -y"
+            docker run --name wazuh_previous -d -v /tmp:/packages $BASE_IMAGE tail -f /dev/null
+            docker exec wazuh_previous bash -c "sed -i.bak 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*"
+            docker exec wazuh_previous bash -c "sed -i.bak 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*"
+            sleep 5
+          fi
+
+          "$RETRY_SCRIPT" --attempts 4 --delay 10 --backoff 2 --max-delay 45 --timeout 600 \
+            --label "Refresh package repositories in self-upgrade test container" -- \
+            docker exec wazuh_previous bash -lc "$UPDATE_CMD"
+          "$RETRY_SCRIPT" --attempts 3 --delay 15 --backoff 2 --max-delay 45 --timeout 900 \
+            --label "Install current manager package for self-upgrade test" -- \
+            docker exec wazuh_previous bash -lc "$INSTALL_CMD"
+          docker exec wazuh_previous bash -c "/var/wazuh-manager/bin/wazuh-manager-control info || echo 'Manager not started yet'"
+
+      - name: Prepare manager self-upgrade preservation rules test
+        if: env.HAS_PREVIOUS_RELEASE == 'false'
+        uses: ./.github/actions/5_builderpackage_manager-upgrade-rules-test
+        with:
+          container_name: wazuh_previous
+          mode: prepare
+          system: ${{ inputs.system }}
+          package_name: ${{ env.PACKAGE_NAME }}
+          package_path: /packages
+          expected_version: ${{ env.WAZUH_VERSION }}
+
+      - name: Self-upgrade current Wazuh version
+        if: env.HAS_PREVIOUS_RELEASE == 'false'
+        timeout-minutes: 20
+        run: |
+          SYSTEM=${{ inputs.system }}
+          FILE_NAME=${{ env.PACKAGE_NAME }}
+
+          if [ "$SYSTEM" = "deb" ]; then
+            INSTALL_CMD="dpkg -i /packages/$FILE_NAME || apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 -f install -y"
+          else
+            INSTALL_CMD="rpm -Uvh --replacepkgs /packages/$FILE_NAME"
+          fi
+
+          "$RETRY_SCRIPT" --attempts 3 --delay 15 --backoff 2 --max-delay 45 --timeout 900 \
+            --label "Self-upgrade manager package in test container" -- \
+            docker exec wazuh_previous bash -lc "$INSTALL_CMD"
+          docker exec wazuh_previous bash -c "/var/wazuh-manager/bin/wazuh-manager-control info || echo 'Manager not started yet after self-upgrade'"
+
+      - name: Validate manager self-upgrade preservation rules test
+        if: env.HAS_PREVIOUS_RELEASE == 'false'
+        uses: ./.github/actions/5_builderpackage_manager-upgrade-rules-test
+        with:
+          container_name: wazuh_previous
+          mode: validate
+          system: ${{ inputs.system }}
+          package_name: ${{ env.PACKAGE_NAME }}
+          package_path: /packages
+          expected_version: ${{ env.WAZUH_VERSION }}
 
       - name: Upload package to GitHub
         if: always()

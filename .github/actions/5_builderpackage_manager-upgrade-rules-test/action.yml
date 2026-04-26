@@ -1,0 +1,37 @@
+name: "Test Wazuh manager upgrade preservation rules"
+description: "Prepare or validate manager 5.x upgrade preservation/overwrite rules inside a running container"
+
+inputs:
+  container_name:
+    description: "Running Docker container name"
+    required: true
+  mode:
+    description: "prepare or validate"
+    required: true
+  system:
+    description: "Package system: deb or rpm"
+    required: true
+  package_name:
+    description: "Target package file name available under package_path"
+    required: true
+  package_path:
+    description: "Host/container package directory"
+    required: false
+    default: "/packages"
+  expected_version:
+    description: "Expected Wazuh manager version after upgrade"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run manager upgrade preservation rules test
+      shell: bash
+      run: |
+        sudo docker cp "${{ github.action_path }}/upgrade_rules_test.sh" "${{ inputs.container_name }}:/tmp/upgrade_rules_test.sh"
+        sudo docker exec "${{ inputs.container_name }}" chmod +x /tmp/upgrade_rules_test.sh
+        sudo docker exec "${{ inputs.container_name }}" /tmp/upgrade_rules_test.sh \
+          "${{ inputs.mode }}" \
+          "${{ inputs.system }}" \
+          "${{ inputs.package_path }}/${{ inputs.package_name }}" \
+          "${{ inputs.expected_version }}"

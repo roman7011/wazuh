@@ -60,9 +60,15 @@ sudo rpm -Uvh wazuh-manager-*.rpm
 
 The package manager will automatically:
 - Stop the current service
-- Preserve your configuration files
-- Install the new binaries
+- Preserve local manager configuration
+- Install updated binaries, libraries, scripts, and required package assets
 - Start the service
+
+During Wazuh Manager 5.x to 5.x upgrades, package-managed configuration under `/var/wazuh-manager/etc` is preserved using the native package manager behavior. When a new packaged default differs from the local file, Debian-based systems may leave a `.dpkg-dist` file and Red Hat-based systems may leave a `.rpmnew` file for administrator review.
+
+The generated `/var/wazuh-manager/etc/wazuh-manager.conf` file is preserved as the active configuration when it exists before the upgrade. If the file was intentionally removed, the upgrade does not silently recreate it as the active configuration. On upgrade, Wazuh writes the newly generated default configuration as `wazuh-manager.conf.dpkg-dist` on Debian-based systems, `wazuh-manager.conf.rpmnew` on Red Hat-based systems, or `wazuh-manager.conf.new` for source-based upgrades.
+
+Runtime data under `/var/wazuh-manager/data` is preserved during 5.x to 5.x upgrades except for `/var/wazuh-manager/data/tzdb`, which is managed by the package or source installer and replaced by the upgraded version.
 
 ### Verify upgrade
 

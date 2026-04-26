@@ -467,6 +467,123 @@ WriteManager()
 
 }
 
+InstallConfigFilePreservingLocal()
+{
+    local SRC_FILE="$1"
+    local DST_FILE="$2"
+    local MODE="$3"
+    local OWNER="$4"
+    local GROUP="$5"
+    local NEW_FILE="${DST_FILE}.new"
+    local TS
+
+    if [ ! -f "${SRC_FILE}" ]; then
+        return 1
+    fi
+
+    if [ "X${update_only}" = "Xyes" ] && PathHasSymlinkParent "${DST_FILE}" "${INSTALLDIR}"; then
+        echo "WARNING: Preserving existing symlinked path, not installing configuration ${DST_FILE}."
+        return 0
+    fi
+
+    if [ ! -e "${DST_FILE}" ] && [ ! -L "${DST_FILE}" ]; then
+        if [ "X${update_only}" = "Xyes" ]; then
+            if [ -L "${NEW_FILE}" ] || { [ -e "${NEW_FILE}" ] && ! cmp -s "${SRC_FILE}" "${NEW_FILE}"; }; then
+                TS=$(date +%Y%m%d%H%M%S)
+                NEW_FILE="${DST_FILE}.new.${TS}"
+            fi
+            if [ ! -e "${NEW_FILE}" ] || ! cmp -s "${SRC_FILE}" "${NEW_FILE}"; then
+                if ${INSTALL} -m "${MODE}" -o "${OWNER}" -g "${GROUP}" "${SRC_FILE}" "${NEW_FILE}"; then
+                    echo "WARNING: Configuration ${DST_FILE} is missing. Review new defaults in ${NEW_FILE}."
+                else
+                    echo "ERROR: Failed to write new default configuration ${NEW_FILE}." >&2
+                    return 1
+                fi
+            fi
+            return 0
+        fi
+        ${INSTALL} -m "${MODE}" -o "${OWNER}" -g "${GROUP}" "${SRC_FILE}" "${DST_FILE}"
+        return $?
+    fi
+
+    if [ "X${update_only}" = "Xyes" ] && ! cmp -s "${SRC_FILE}" "${DST_FILE}"; then
+        if [ -L "${NEW_FILE}" ] || { [ -e "${NEW_FILE}" ] && ! cmp -s "${SRC_FILE}" "${NEW_FILE}"; }; then
+            TS=$(date +%Y%m%d%H%M%S)
+            NEW_FILE="${DST_FILE}.new.${TS}"
+        fi
+        if [ ! -e "${NEW_FILE}" ] || ! cmp -s "${SRC_FILE}" "${NEW_FILE}"; then
+            if ! ${INSTALL} -m "${MODE}" -o "${OWNER}" -g "${GROUP}" "${SRC_FILE}" "${NEW_FILE}"; then
+                echo "ERROR: Failed to write new default configuration ${NEW_FILE}." >&2
+                return 1
+            fi
+        fi
+        echo "WARNING: Existing configuration preserved: ${DST_FILE}. Review new defaults in ${NEW_FILE}."
+    fi
+
+    return 0
+}
+
+PathHasSymlinkParent()
+{
+    local TARGET_PATH="$1"
+    local ROOT_PATH="$2"
+    local CURRENT_PATH
+
+    CURRENT_PATH=$(dirname "${TARGET_PATH}")
+
+    while [ "${CURRENT_PATH}" != "${ROOT_PATH}" ] && [ "${CURRENT_PATH}" != "/" ] && [ -n "${CURRENT_PATH}" ]; do
+        if [ -L "${CURRENT_PATH}" ]; then
+            return 0
+        fi
+        CURRENT_PATH=$(dirname "${CURRENT_PATH}")
+    done
+
+    [ -L "${ROOT_PATH}" ]
+}
+
+InstallDataFilePreservingLocal()
+{
+    local SRC_FILE="$1"
+    local DST_FILE="$2"
+    local MODE="$3"
+    local OWNER="$4"
+    local GROUP="$5"
+
+    if [ ! -f "${SRC_FILE}" ]; then
+        return 1
+    fi
+
+    if [ "X${update_only}" = "Xyes" ] && PathHasSymlinkParent "${DST_FILE}" "${INSTALLDIR}"; then
+        echo "WARNING: Preserving existing symlinked path, not installing ${DST_FILE}."
+        return 0
+    fi
+
+    if [ "X${update_only}" = "Xyes" ] && { [ -e "${DST_FILE}" ] || [ -L "${DST_FILE}" ]; }; then
+        return 0
+    fi
+
+    ${INSTALL} -m "${MODE}" -o "${OWNER}" -g "${GROUP}" "${SRC_FILE}" "${DST_FILE}"
+}
+
+InstallDirectoryPreservingLocal()
+{
+    local DST_DIR="$1"
+    local MODE="$2"
+    local OWNER="$3"
+    local GROUP="$4"
+
+    if [ "X${update_only}" = "Xyes" ] && PathHasSymlinkParent "${DST_DIR}" "${INSTALLDIR}"; then
+        echo "WARNING: Preserving existing symlinked path, not creating ${DST_DIR}."
+        return 0
+    fi
+
+    if [ "X${update_only}" = "Xyes" ] && { [ -e "${DST_DIR}" ] || [ -L "${DST_DIR}" ]; }; then
+        return 0
+    fi
+
+    ${INSTALL} -d -m "${MODE}" -o "${OWNER}" -g "${GROUP}" "${DST_DIR}"
+}
+
 InstallCommon()
 {
   WAZUH_GROUP='wazuh'
@@ -781,15 +898,22 @@ InstallCommon()
 
   ${INSTALL} -d -m 0770 -o root -g ${WAZUH_GROUP} ${INSTALLDIR}/etc
 
-    if [ -f /etc/localtime ]
-    then
-         ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/localtime ${INSTALLDIR}/etc
+    if [ -f /etc/localtime ]; then
+        if [ "X${INSTYPE}" = "Xmanager" ]; then
+            [ ! -e "${INSTALLDIR}/etc/localtime" ] && [ ! -L "${INSTALLDIR}/etc/localtime" ] && ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/localtime "${INSTALLDIR}/etc"
+        else
+            ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/localtime "${INSTALLDIR}/etc"
+        fi
     fi
 
   ${INSTALL} -d -m 1770 -o root -g ${WAZUH_GROUP} ${INSTALLDIR}/tmp
 
     if [ -f /etc/TIMEZONE ]; then
-         ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/TIMEZONE ${INSTALLDIR}/etc/
+        if [ "X${INSTYPE}" = "Xmanager" ]; then
+            [ ! -e "${INSTALLDIR}/etc/TIMEZONE" ] && [ ! -L "${INSTALLDIR}/etc/TIMEZONE" ] && ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/TIMEZONE "${INSTALLDIR}/etc/"
+        else
+            ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} /etc/TIMEZONE "${INSTALLDIR}/etc/"
+        fi
     fi
 
     if [ "X${INSTYPE}" = "Xagent" ]; then
@@ -799,9 +923,7 @@ InstallCommon()
             ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} ../etc/local_internal_options.conf ${INSTALLDIR}/etc/local_internal_options.conf
         fi
     else
-        if [ ! -f ${INSTALLDIR}/etc/wazuh-manager-internal-options.conf ]; then
-            ${INSTALL} -m 0640 -o root -g ${WAZUH_GROUP} ../etc/wazuh-manager-internal-options.conf ${INSTALLDIR}/etc/wazuh-manager-internal-options.conf
-        fi
+        InstallConfigFilePreservingLocal ../etc/wazuh-manager-internal-options.conf ${INSTALLDIR}/etc/wazuh-manager-internal-options.conf 0640 root ${WAZUH_GROUP}
     fi
 
     if [ ! -f ${INSTALLDIR}/etc/client.keys ]; then
@@ -812,7 +934,7 @@ InstallCommon()
         fi
     fi
 
-    if [ ! -f ${INSTALLDIR}/etc/${WAZUH_CONF} ]; then
+    if [ "X${INSTYPE}" = "Xmanager" ]; then
         if [ ! -f ../etc/wazuh.mc ]; then
             echo "WARNING: missing ../etc/wazuh.mc. Regenerating configuration template."
             if ! ./init/gen_wazuh.sh conf "${INSTYPE}" "${DIST_NAME}" "${DIST_VER}.${DIST_SUBVER}" "${INSTALLDIR}" > ../etc/wazuh.mc; then
@@ -822,10 +944,27 @@ InstallCommon()
         fi
 
         if [ -f ../etc/wazuh.mc ]; then
-            ${INSTALL} -m 0660 -o root -g ${WAZUH_GROUP} ../etc/wazuh.mc ${INSTALLDIR}/etc/${WAZUH_CONF}
+            InstallConfigFilePreservingLocal ../etc/wazuh.mc ${INSTALLDIR}/etc/${WAZUH_CONF} 0660 root ${WAZUH_GROUP}
         else
             echo "WARNING: unable to generate ${WAZUH_CONF} with desired configurations, using default configurations from ${WAZUH_CONF_SRC}"
-            ${INSTALL} -m 0660 -o root -g ${WAZUH_GROUP} ${WAZUH_CONF_SRC} ${INSTALLDIR}/etc/${WAZUH_CONF}
+            InstallConfigFilePreservingLocal ${WAZUH_CONF_SRC} ${INSTALLDIR}/etc/${WAZUH_CONF} 0660 root ${WAZUH_GROUP}
+        fi
+    else
+        if [ ! -f ${INSTALLDIR}/etc/${WAZUH_CONF} ]; then
+            if [ ! -f ../etc/wazuh.mc ]; then
+                echo "WARNING: missing ../etc/wazuh.mc. Regenerating configuration template."
+                if ! ./init/gen_wazuh.sh conf "${INSTYPE}" "${DIST_NAME}" "${DIST_VER}.${DIST_SUBVER}" "${INSTALLDIR}" > ../etc/wazuh.mc; then
+                    rm -f ../etc/wazuh.mc
+                    echo "WARNING: unable to regenerate ../etc/wazuh.mc."
+                fi
+            fi
+
+            if [ -f ../etc/wazuh.mc ]; then
+                ${INSTALL} -m 0660 -o root -g ${WAZUH_GROUP} ../etc/wazuh.mc ${INSTALLDIR}/etc/${WAZUH_CONF}
+            else
+                echo "WARNING: unable to generate ${WAZUH_CONF} with desired configurations, using default configurations from ${WAZUH_CONF_SRC}"
+                ${INSTALL} -m 0660 -o root -g ${WAZUH_GROUP} ${WAZUH_CONF_SRC} ${INSTALLDIR}/etc/${WAZUH_CONF}
+            fi
         fi
     fi
 
@@ -887,20 +1026,20 @@ installEngineStore()
     local ENGINE_ENRICHMENT_GEO=${ENRICHMENT_PATH}/geo
     local ENGINE_ENRICHMENT_IOC=${ENRICHMENT_PATH}/ioc
 
-    ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${STORE_PATH}
-    mkdir -p "${ENGINE_SCHEMA_PATH}"
-    mkdir -p "${ENGINE_LOGPAR_TYPE_PATH}"
-    mkdir -p "${ENGINE_ALLOWED_FIELDS_PATH}"
-    mkdir -p "${ENGINE_ENRICHMENT_GEO}"
-    mkdir -p "${ENGINE_ENRICHMENT_IOC}"
+    InstallDirectoryPreservingLocal "${STORE_PATH}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${ENGINE_SCHEMA_PATH}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${ENGINE_LOGPAR_TYPE_PATH}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${ENGINE_ALLOWED_FIELDS_PATH}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${ENGINE_ENRICHMENT_GEO}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${ENGINE_ENRICHMENT_IOC}" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
 
     # Copying the store files
     echo "Copying store files..."
-    cp "${ENGINE_SRC_PATH}/ruleset/schemas/engine-schema.json" "${ENGINE_SCHEMA_PATH}/0"
-    cp "${ENGINE_SRC_PATH}/ruleset/schemas/wazuh-logpar-overrides.json" "${ENGINE_LOGPAR_TYPE_PATH}/0"
-    cp "${ENGINE_SRC_PATH}/ruleset/schemas/allowed-fields.json" "${ENGINE_ALLOWED_FIELDS_PATH}/0"
-    cp "${ENGINE_SRC_PATH}/ruleset/schemas/enrichment-geo.json" "${ENGINE_ENRICHMENT_GEO}/0"
-    cp "${ENGINE_SRC_PATH}/ruleset/schemas/enrichment-ioc.json" "${ENGINE_ENRICHMENT_IOC}/0"
+    InstallDataFilePreservingLocal "${ENGINE_SRC_PATH}/ruleset/schemas/engine-schema.json" "${ENGINE_SCHEMA_PATH}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDataFilePreservingLocal "${ENGINE_SRC_PATH}/ruleset/schemas/wazuh-logpar-overrides.json" "${ENGINE_LOGPAR_TYPE_PATH}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDataFilePreservingLocal "${ENGINE_SRC_PATH}/ruleset/schemas/allowed-fields.json" "${ENGINE_ALLOWED_FIELDS_PATH}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDataFilePreservingLocal "${ENGINE_SRC_PATH}/ruleset/schemas/enrichment-geo.json" "${ENGINE_ENRICHMENT_GEO}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDataFilePreservingLocal "${ENGINE_SRC_PATH}/ruleset/schemas/enrichment-ioc.json" "${ENGINE_ENRICHMENT_IOC}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
 
     if [ ! -f "${ENGINE_SCHEMA_PATH}/0" ] || [ ! -f "${ENGINE_LOGPAR_TYPE_PATH}/0" ] \
         || [ ! -f "${ENGINE_ALLOWED_FIELDS_PATH}/0" ] || [ ! -f "${ENGINE_ENRICHMENT_GEO}/0" ] \
@@ -909,21 +1048,28 @@ installEngineStore()
         exit 1
     fi
 
-    chown -R ${WAZUH_USER}:${WAZUH_GROUP} ${STORE_PATH}
-    find ${STORE_PATH} -type d -exec chmod 770 {} \; -o -type f -exec chmod 660 {} \;
+    if [ "X${update_only}" != "Xyes" ]; then
+        chown -R ${WAZUH_USER}:${WAZUH_GROUP} "${STORE_PATH}"
+        find "${STORE_PATH}" -type d -exec chmod 770 {} \; -o -type f -exec chmod 660 {} \;
+    fi
 
     echo "Engine store installed successfully."
 
     # Copy default output configuration files
     local OUTPUTS_PATH=${INSTALLDIR}/etc/outputs
     local DEFAULT_OUTPUTS_PATH=${OUTPUTS_PATH}/default
-    ${INSTALL} -d -m 0750 -o root -g ${WAZUH_GROUP} ${DEFAULT_OUTPUTS_PATH}
-    cp "${ENGINE_SRC_PATH}/ruleset/outputs/"*.yml "${DEFAULT_OUTPUTS_PATH}/"
-    chown -R ${WAZUH_USER}:${WAZUH_GROUP} ${OUTPUTS_PATH}
-    find ${OUTPUTS_PATH} -type d -exec chmod 750 {} \; -o -type f -exec chmod 640 {} \;
+    local OUTPUT_FILE
+    InstallDirectoryPreservingLocal "${DEFAULT_OUTPUTS_PATH}" 0750 root ${WAZUH_GROUP}
+    for OUTPUT_FILE in "${ENGINE_SRC_PATH}/ruleset/outputs/"*.yml; do
+        InstallConfigFilePreservingLocal "${OUTPUT_FILE}" "${DEFAULT_OUTPUTS_PATH}/$(basename "${OUTPUT_FILE}")" 0640 ${WAZUH_USER} ${WAZUH_GROUP}
+    done
+    if [ "X${update_only}" != "Xyes" ]; then
+        chown -R ${WAZUH_USER}:${WAZUH_GROUP} "${OUTPUTS_PATH}"
+        find "${OUTPUTS_PATH}" -type d -exec chmod 750 {} \; -o -type f -exec chmod 640 {} \;
+    fi
 
     # Create /var/wazuh-manager/data/ruleset
-    install -d -m 0750 -o root -g ${WAZUH_GROUP} ${INSTALLDIR}/data/ruleset
+    InstallDirectoryPreservingLocal "${INSTALLDIR}/data/ruleset" 0750 root ${WAZUH_GROUP}
 
     echo "Engine output configuration files installed successfully."
 }
@@ -936,11 +1082,12 @@ installGeoIP()
     local MMDB_PATH=${DEST_FULL_PATH}/mmdb
     local STORE_GEO_PATH=${DEST_FULL_PATH}/store/geo/mmdb
     local MANIFEST_FILE=${GEOIP_SRC_PATH}/manifest.json
+    local STORE_GEO_TMP_FILE
 
     # Create directories
-    ${INSTALL} -d -m 0770 -o root -g ${WAZUH_GROUP} ${MMDB_PATH}
-    ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${DEST_FULL_PATH}/store/geo
-    ${INSTALL} -d -m 0770 -o root -g ${WAZUH_GROUP} ${STORE_GEO_PATH}
+    InstallDirectoryPreservingLocal "${MMDB_PATH}" 0770 root ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${DEST_FULL_PATH}/store/geo" 0770 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDirectoryPreservingLocal "${STORE_GEO_PATH}" 0770 root ${WAZUH_GROUP}
 
     # Check if GeoIP files exist
     if [ ! -f "${GEOIP_SRC_PATH}/GeoLite2-ASN.mmdb" ] || [ ! -f "${GEOIP_SRC_PATH}/GeoLite2-City.mmdb" ]; then
@@ -956,8 +1103,8 @@ installGeoIP()
     echo "Installing GeoIP databases..."
 
     # Copy .mmdb files
-    ${INSTALL} -m 0660 -o ${WAZUH_USER} -g ${WAZUH_GROUP} "${GEOIP_SRC_PATH}/GeoLite2-ASN.mmdb" "${MMDB_PATH}/"
-    ${INSTALL} -m 0660 -o ${WAZUH_USER} -g ${WAZUH_GROUP} "${GEOIP_SRC_PATH}/GeoLite2-City.mmdb" "${MMDB_PATH}/"
+    InstallDataFilePreservingLocal "${GEOIP_SRC_PATH}/GeoLite2-ASN.mmdb" "${MMDB_PATH}/GeoLite2-ASN.mmdb" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallDataFilePreservingLocal "${GEOIP_SRC_PATH}/GeoLite2-City.mmdb" "${MMDB_PATH}/GeoLite2-City.mmdb" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
 
     # Parse manifest.json without jq or python - using grep and sed
     ASN_MD5=$(grep -A 2 '"asn"' "${MANIFEST_FILE}" | grep '"md5"' | sed 's/.*"md5"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
@@ -965,7 +1112,8 @@ installGeoIP()
     GENERATED_AT=$(grep '"generated_at"' "${MANIFEST_FILE}" | sed 's/.*"generated_at"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/')
 
     # Generate metadata JSON file
-    cat > "${STORE_GEO_PATH}/0" << EOF
+    STORE_GEO_TMP_FILE="${STORE_GEO_PATH}/0.new.$$"
+    cat > "${STORE_GEO_TMP_FILE}" << EOF
 {
     "city": {
         "path": "${MMDB_PATH}/GeoLite2-City.mmdb",
@@ -980,9 +1128,8 @@ installGeoIP()
 }
 EOF
 
-    # Set proper ownership and permissions
-    chown ${WAZUH_USER}:${WAZUH_GROUP} "${STORE_GEO_PATH}/0"
-    chmod 660 "${STORE_GEO_PATH}/0"
+    InstallDataFilePreservingLocal "${STORE_GEO_TMP_FILE}" "${STORE_GEO_PATH}/0" 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    rm -f "${STORE_GEO_TMP_FILE}"
 
     echo "GeoIP databases installed successfully."
 }
@@ -991,21 +1138,52 @@ installTZDB()
 {
     local TZDB_SRC_PATH=./external/tzdata
     local TZDB_DST_PATH=${INSTALLDIR}/data/tzdb/iana
-
-    ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/data/tzdb
-    ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${TZDB_DST_PATH}
+    local TZDB_PARENT_PATH=${INSTALLDIR}/data/tzdb
+    local TZDB_STAGE_PATH=${INSTALLDIR}/tmp/tzdb.new.$$
+    local TZDB_BACKUP_PATH=${INSTALLDIR}/tmp/tzdb.backup.$$
 
     if [ ! -f "${TZDB_SRC_PATH}/version" ]; then
         echo "Warning: Timezone database not found in ${TZDB_SRC_PATH}. Skipping TZDB installation."
         return 0
     fi
 
+    if [ "X${update_only}" = "Xyes" ]; then
+        if PathHasSymlinkParent "${TZDB_PARENT_PATH}" "${INSTALLDIR}" || PathHasSymlinkParent "${TZDB_STAGE_PATH}" "${INSTALLDIR}"; then
+            echo "WARNING: Preserving existing symlinked path, not installing timezone database ${TZDB_PARENT_PATH}."
+            return 0
+        fi
+    fi
+
     echo "Installing timezone database..."
 
-    cp -r "${TZDB_SRC_PATH}/." "${TZDB_DST_PATH}/"
-    chown -R ${WAZUH_USER}:${WAZUH_GROUP} "${TZDB_DST_PATH}"
-    find "${TZDB_DST_PATH}" -type f -exec chmod 0640 {} +
-    find "${TZDB_DST_PATH}" -type d -exec chmod 0750 {} +
+    rm -rf "${TZDB_STAGE_PATH}" "${TZDB_BACKUP_PATH}"
+    ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} "${TZDB_STAGE_PATH}/iana"
+    cp -r "${TZDB_SRC_PATH}/." "${TZDB_STAGE_PATH}/iana/"
+
+    if [ ! -f "${TZDB_STAGE_PATH}/iana/version" ]; then
+        rm -rf "${TZDB_STAGE_PATH}"
+        echo "Warning: Generated timezone database is incomplete. Skipping TZDB installation."
+        return 0
+    fi
+
+    chown -R ${WAZUH_USER}:${WAZUH_GROUP} "${TZDB_STAGE_PATH}"
+    find "${TZDB_STAGE_PATH}" -type f -exec chmod 0640 {} +
+    find "${TZDB_STAGE_PATH}" -type d -exec chmod 0750 {} +
+
+    if [ "X${update_only}" = "Xyes" ] && { [ -e "${TZDB_PARENT_PATH}" ] || [ -L "${TZDB_PARENT_PATH}" ]; }; then
+        mv "${TZDB_PARENT_PATH}" "${TZDB_BACKUP_PATH}"
+    fi
+
+    if mv "${TZDB_STAGE_PATH}" "${TZDB_PARENT_PATH}"; then
+        rm -rf "${TZDB_BACKUP_PATH}"
+    else
+        rm -rf "${TZDB_PARENT_PATH}"
+        if [ -e "${TZDB_BACKUP_PATH}" ] || [ -L "${TZDB_BACKUP_PATH}" ]; then
+            mv "${TZDB_BACKUP_PATH}" "${TZDB_PARENT_PATH}"
+        fi
+        echo "Warning: Failed to install timezone database."
+        return 1
+    fi
 
     echo "Timezone database installed successfully."
 }
@@ -1038,7 +1216,7 @@ InstallLocal()
 
     generateSchemaFiles
 
-    ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/data
+    InstallDirectoryPreservingLocal "${INSTALLDIR}/data" 0750 ${WAZUH_USER} ${WAZUH_GROUP}
 
     installEngineStore
 
@@ -1046,7 +1224,7 @@ InstallLocal()
 
     installTZDB
 
-    ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/data/kvdb-ioc
+    InstallDirectoryPreservingLocal "${INSTALLDIR}/data/kvdb-ioc" 0750 ${WAZUH_USER} ${WAZUH_GROUP}
     ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/db
 
     if [ "X${OPTIMIZE_CPYTHON}" = "Xy" ]; then
@@ -1088,6 +1266,9 @@ InstallLocal()
 TransferShared()
 {
     rm -f ${INSTALLDIR}/etc/shared/merged.mg
+    if [ "X${update_only}" = "Xyes" ]; then
+        return 0
+    fi
     find ${INSTALLDIR}/etc/shared -maxdepth 1 -type f -exec cp -pf {} ${INSTALLDIR}/backup/shared \;
     find ${INSTALLDIR}/etc/shared -maxdepth 1 -type f -exec mv -f {} ${INSTALLDIR}/etc/shared/default \;
 }
@@ -1160,13 +1341,8 @@ InstallServer()
     ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/backup/agents
     ${INSTALL} -d -m 0750 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/backup/db
 
-    if [ ! -f ${INSTALLDIR}/etc/shared/default/agent.conf ]; then
-        ${INSTALL} -m 0660 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ../etc/agent.conf ${INSTALLDIR}/etc/shared/default
-    fi
-
-    if [ ! -f ${INSTALLDIR}/etc/shared/agent-template.conf ]; then
-        ${INSTALL} -m 0660 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ../etc/agent.conf ${INSTALLDIR}/etc/shared/agent-template.conf
-    fi
+    InstallConfigFilePreservingLocal ../etc/agent.conf ${INSTALLDIR}/etc/shared/default/agent.conf 0660 ${WAZUH_USER} ${WAZUH_GROUP}
+    InstallConfigFilePreservingLocal ../etc/agent.conf ${INSTALLDIR}/etc/shared/agent-template.conf 0660 ${WAZUH_USER} ${WAZUH_GROUP}
 
     GenerateAuthCert
 

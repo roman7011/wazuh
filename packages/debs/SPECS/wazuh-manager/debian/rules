@@ -73,10 +73,22 @@ override_dh_install:
 	rm -rf $(INSTALLATION_DIR)/logs/*.json
 
 	./gen_permissions.sh $(INSTALLATION_DIR)/ ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions.sh
+	cp ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions.sh ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh
+	awk 'index($$0, "/var/wazuh-manager/etc/") == 0 && (index($$0, "/var/wazuh-manager/data/") == 0 || $$0 ~ /\/var\/wazuh-manager\/data\/tzdb(\/|[" ]|$$)/)' \
+		${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh > ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh.tmp
+	mv ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh.tmp ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh
+	chmod +x ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions.sh ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/restore-permissions-preserve-safe.sh
 
 	# Copying to target
 	mkdir -p ${TARGET_DIR}$(INSTALLATION_DIR)/
 	cp -r $(INSTALLATION_DIR)/. $(TARGET_DIR)$(INSTALLATION_DIR)/
+	# Generated host/runtime files are created by maintainer scripts.
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/wazuh-manager.conf
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/wazuh-manager.conf.new
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/localtime
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/TIMEZONE
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/sslmanager.cert
+	rm -f ${TARGET_DIR}$(INSTALLATION_DIR)/etc/sslmanager.key
 
 	mkdir -p ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/
 	cp VERSION.json ${TARGET_DIR}$(INSTALLATION_SCRIPTS_DIR)/
@@ -106,9 +118,23 @@ override_dh_fixperms:
 	chmod 0640 ${TARGET_DIR}$(INSTALLATION_DIR)/framework/python/lib/pkgconfig/python3.pc
 
 override_dh_auto_clean:
+	rm -f debian/wazuh-manager.conffiles
 	$(MAKE) -C src clean
+
+override_dh_installdeb:
+	rm -f debian/wazuh-manager.conffiles
+	for FILE in $(INSTALLATION_DIR)/etc/client.keys $(INSTALLATION_DIR)/etc/wazuh-manager-internal-options.conf $(INSTALLATION_DIR)/etc/shared/agent-template.conf ; do \
+	    if [ -f "${TARGET_DIR}$${FILE}" ]; then echo "$${FILE}" >> debian/wazuh-manager.conffiles; fi; \
+	done
+	for DIR in $(INSTALLATION_DIR)/etc/shared/default $(INSTALLATION_DIR)/etc/outputs/default ; do \
+	    if [ -d "${TARGET_DIR}$${DIR}" ]; then \
+	        find "${TARGET_DIR}$${DIR}" -type f | sed "s#^${TARGET_DIR}##" >> debian/wazuh-manager.conffiles; \
+	    fi; \
+	done
+	if [ -f debian/wazuh-manager.conffiles ]; then sort -u -o debian/wazuh-manager.conffiles debian/wazuh-manager.conffiles; fi
+	dh_installdeb
 
 override_dh_strip:
 	dh_strip --dbg-package=wazuh-manager-dbg --exclude=${PKG_DIR}${INSTALLATION_DIR}/framework/python
 
-.PHONY: override_dh_install override_dh_strip override_dh_auto_clean override_dh_auto_build override_dh_auto_configure override_dh_fixperms
+.PHONY: override_dh_install override_dh_strip override_dh_auto_clean override_dh_auto_build override_dh_auto_configure override_dh_fixperms override_dh_installdeb

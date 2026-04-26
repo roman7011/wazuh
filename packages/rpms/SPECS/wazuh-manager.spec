@@ -1,4 +1,4 @@
-%if %{_isstage} == no
+%if "%{_isstage}" == "no"
   %define _rpmfilename %%{NAME}_%%{VERSION}-%%{RELEASE}_%%{ARCH}_%{_hashcommit}.rpm
 %else
   %define _rpmfilename %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm
@@ -84,6 +84,12 @@ mkdir -p ${RPM_BUILD_ROOT}%{_localstatedir}
 
 # Copy the installed files into RPM_BUILD_ROOT directory
 cp -pr %{_localstatedir}/* ${RPM_BUILD_ROOT}%{_localstatedir}/
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/wazuh-manager.conf
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/wazuh-manager.conf.new
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/localtime
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/TIMEZONE
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/sslmanager.cert
+rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/etc/sslmanager.key
 sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/wazuh-rh.init
 install -m 0755 src/init/templates/wazuh-rh.init ${RPM_BUILD_ROOT}%{_initrddir}/wazuh-manager
 mkdir -p ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
@@ -122,7 +128,7 @@ exit 0
 # ============================================================
 # HARD BLOCK: Prevent upgrade from 4.X to 5.X
 # ============================================================
-if [ $1 = 2 ]; then
+if [ "$1" -eq 2 ]; then
   # Check if this is an upgrade from 4.X
   if [ -f %{_sysconfdir}/ossec-init.conf ]; then
     . %{_sysconfdir}/ossec-init.conf
@@ -159,7 +165,7 @@ if ! getent passwd wazuh-manager > /dev/null 2>&1; then
 fi
 
 # Validate upgrade constraints for Manager (only during upgrade)
-if [ $1 = 2 ]; then
+if [ "$1" -eq 2 ]; then
   # Get version information
   if [ -f "%{_localstatedir}/bin/wazuh-manager-control" ]; then
     OLD_VERSION=`%{_localstatedir}/bin/wazuh-manager-control info -v 2>/dev/null`
@@ -209,7 +215,7 @@ EOF
 fi
 
 # Stop the services to upgrade the package
-if [ $1 = 2 ]; then
+if [ "$1" -eq 2 ]; then
   if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
     systemctl stop wazuh-manager.service > /dev/null 2>&1
     touch %{_localstatedir}/tmp/wazuh.restart
@@ -228,6 +234,33 @@ if [ $1 = 2 ]; then
 fi
 if pgrep -f wazuh-manager-authd > /dev/null 2>&1; then
     kill -15 $(pgrep -f wazuh-manager-authd)
+fi
+
+if [ "$1" -eq 2 ]; then
+  # Preserve runtime data before RPM unpacks the new payload. Any failure here
+  # must abort the upgrade before data/tzdb is moved out of the active tree.
+  DATA_BACKUP="%{_localstatedir}/packages_files/manager_data_preserve"
+  TZDB_BACKUP="%{_localstatedir}/packages_files/manager_tzdb_backup"
+  rm -rf "${DATA_BACKUP}" || exit 1
+  mkdir -p "${DATA_BACKUP}" || exit 1
+  if [ -d "%{_localstatedir}/data" ]; then
+    for item in "%{_localstatedir}"/data/* "%{_localstatedir}"/data/.[!.]* "%{_localstatedir}"/data/..?*; do
+      [ -e "${item}" ] || [ -L "${item}" ] || continue
+      [ "$(basename "${item}")" = "tzdb" ] && continue
+      cp -a "${item}" "${DATA_BACKUP}/" || exit 1
+    done
+  fi
+  if [ -e "%{_localstatedir}/data/tzdb" ] || [ -L "%{_localstatedir}/data/tzdb" ]; then
+    rm -rf "${TZDB_BACKUP}" || exit 1
+    mv "%{_localstatedir}/data/tzdb" "${TZDB_BACKUP}" || exit 1
+    if ! touch "%{_localstatedir}/packages_files/manager_tzdb_backup_prepared"; then
+      mkdir -p "%{_localstatedir}/data" || exit 1
+      mv "${TZDB_BACKUP}" "%{_localstatedir}/data/tzdb" || exit 1
+      exit 1
+    fi
+  elif [ -e "${TZDB_BACKUP}" ] || [ -L "${TZDB_BACKUP}" ]; then
+    touch "%{_localstatedir}/packages_files/manager_tzdb_backup_prepared" || exit 1
+  fi
 fi
 
 # Remove/relocate existing SQLite databases
@@ -255,7 +288,7 @@ if [ -d %{_localstatedir}/queue/agent-info ]; then
 fi
 
 # Delete old API backups
-if [ $1 = 2 ]; then
+if [ "$1" -eq 2 ]; then
   if [ -d %{_localstatedir}/~api ]; then
     rm -rf %{_localstatedir}/~api
   fi
@@ -291,7 +324,7 @@ fi
 %post
 
 # Upgrade install code block
-if [ $1 = 2 ]; then
+if [ "$1" -eq 2 ]; then
   if [ -d %{_localstatedir}/logs/ossec ]; then
     rm -rf %{_localstatedir}/logs/wazuh
     cp -rp %{_localstatedir}/logs/ossec %{_localstatedir}/logs/wazuh
@@ -302,10 +335,55 @@ if [ $1 = 2 ]; then
     cp -rp %{_localstatedir}/queue/ossec %{_localstatedir}/queue/sockets
   fi
 
+  . "%{_localstatedir}/packages_files/manager_installation_scripts/src/init/dist-detect.sh" || exit 1
+
+  # Generate a review copy of the new default manager configuration.
+  MANAGER_CONF_EXISTS=0
+  if [ -f "%{_localstatedir}/etc/wazuh-manager.conf" ]; then
+    MANAGER_CONF_EXISTS=1
+  fi
+  rm -f "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew" || exit 1
+  "%{_localstatedir}/packages_files/manager_installation_scripts/src/init/gen_wazuh.sh" conf manager ${DIST_NAME} ${DIST_VER}.${DIST_SUBVER} "%{_localstatedir}" > "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew" || exit 1
+  chown root:wazuh-manager "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew" || exit 1
+  chmod 0660 "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew" || exit 1
+  if [ "${MANAGER_CONF_EXISTS}" -eq 1 ] && cmp -s "%{_localstatedir}/etc/wazuh-manager.conf" "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew"; then
+    rm -f "%{_localstatedir}/etc/wazuh-manager.conf.rpmnew" || exit 1
+  elif [ "${MANAGER_CONF_EXISTS}" -eq 1 ]; then
+    echo "Preserved existing %{_localstatedir}/etc/wazuh-manager.conf. Review new defaults in %{_localstatedir}/etc/wazuh-manager.conf.rpmnew."
+  else
+    echo "No existing %{_localstatedir}/etc/wazuh-manager.conf was found. Generated new defaults in %{_localstatedir}/etc/wazuh-manager.conf.rpmnew for review."
+  fi
+
+  # Restore preserved runtime data before deleting packages_files. If restore
+  # fails, keep the backup in place so the upgrade can be retried or recovered.
+  DATA_BACKUP="%{_localstatedir}/packages_files/manager_data_preserve"
+  TZDB_BACKUP="%{_localstatedir}/packages_files/manager_tzdb_backup"
+  if [ -d "${DATA_BACKUP}" ]; then
+    mkdir -p "%{_localstatedir}/data" || exit 1
+    for item in "${DATA_BACKUP}"/* "${DATA_BACKUP}"/.[!.]* "${DATA_BACKUP}"/..?*; do
+      [ -e "${item}" ] || [ -L "${item}" ] || continue
+      base=$(basename "${item}")
+      [ "${base}" = "tzdb" ] && continue
+      rm -rf "%{_localstatedir}/data/${base}" || exit 1
+      cp -a "${item}" "%{_localstatedir}/data/" || exit 1
+    done
+    rm -rf "${DATA_BACKUP}" || exit 1
+  fi
+
+  if [ -d "%{_localstatedir}/data/tzdb/iana" ] && [ -f "%{_localstatedir}/data/tzdb/iana/version" ]; then
+    rm -rf "${TZDB_BACKUP}" || exit 1
+    rm -f "%{_localstatedir}/packages_files/manager_tzdb_backup_prepared" || exit 1
+  elif [ -e "${TZDB_BACKUP}" ] || [ -L "${TZDB_BACKUP}" ]; then
+    rm -rf "%{_localstatedir}/data/tzdb" || exit 1
+    mkdir -p "%{_localstatedir}/data" || exit 1
+    mv "${TZDB_BACKUP}" "%{_localstatedir}/data/tzdb" || exit 1
+    rm -f "%{_localstatedir}/packages_files/manager_tzdb_backup_prepared" || exit 1
+  fi
+
 fi
 
 # Fresh install code block
-if [ $1 = 1 ]; then
+if [ "$1" -eq 1 ]; then
 
   . %{_localstatedir}/packages_files/manager_installation_scripts/src/init/dist-detect.sh
 
@@ -334,6 +412,17 @@ if [ ! -f "%{_localstatedir}/etc/sslmanager.key" ] && [ ! -f "%{_localstatedir}/
   chmod 640 %{_localstatedir}/etc/sslmanager.cert
 fi
 
+if [ ! -e %{_localstatedir}/etc/localtime ] && [ -r %{_sysconfdir}/localtime ]; then
+  cp -fpL %{_sysconfdir}/localtime %{_localstatedir}/etc
+  chown root:wazuh-manager %{_localstatedir}/etc/localtime
+  chmod 0640 %{_localstatedir}/etc/localtime
+fi
+if [ ! -e %{_localstatedir}/etc/TIMEZONE ] && [ -r %{_sysconfdir}/TIMEZONE ]; then
+  cp -fp %{_sysconfdir}/TIMEZONE %{_localstatedir}/etc
+  chown root:root %{_localstatedir}/etc/TIMEZONE
+  chmod 0640 %{_localstatedir}/etc/TIMEZONE
+fi
+
 rm -f %{_localstatedir}/etc/shared/merged.mg  >/dev/null 2>&1
 
 # Set merged.mg permissions to new ones
@@ -348,14 +437,13 @@ if command -v getenforce > /dev/null 2>&1 && command -v semodule > /dev/null 2>&
 fi
 
 # Restore wazuh-manager.conf permissions after upgrading
-chown root:wazuh-manager %{_localstatedir}/etc/wazuh-manager.conf
-chmod 0660 %{_localstatedir}/etc/wazuh-manager.conf
+if [ -e %{_localstatedir}/etc/wazuh-manager.conf ] || [ -L %{_localstatedir}/etc/wazuh-manager.conf ]; then
+  chown root:wazuh-manager %{_localstatedir}/etc/wazuh-manager.conf
+  chmod 0660 %{_localstatedir}/etc/wazuh-manager.conf
+fi
 
 # Delete the installation files used to configure the manager
 rm -rf %{_localstatedir}/packages_files
-
-# Remove unnecessary files from default group
-rm -f %{_localstatedir}/etc/shared/default/*.rpmnew
 
 # Remove old ossec user and group if exists and change ownwership of files
 
@@ -380,7 +468,7 @@ fi
 
 %preun
 
-if [ $1 = 0 ]; then
+if [ "$1" -eq 0 ]; then
 
   # Stop the services before uninstall the package
   # Check for systemd
@@ -406,7 +494,7 @@ fi
 %postun
 
 # If the package is been uninstalled
-if [ $1 = 0 ];then
+if [ "$1" -eq 0 ];then
   # Remove the wazuh-manager user if it exists
   if getent passwd wazuh-manager > /dev/null 2>&1; then
     userdel wazuh-manager >/dev/null 2>&1
@@ -454,6 +542,14 @@ fi
 
 # posttrans code is the last thing executed in a install/upgrade
 %posttrans
+if [ -e "%{_localstatedir}/packages_files/manager_tzdb_backup" ] || [ -L "%{_localstatedir}/packages_files/manager_tzdb_backup" ]; then
+  if [ ! -f "%{_localstatedir}/data/tzdb/iana/version" ]; then
+    rm -rf "%{_localstatedir}/data/tzdb" || exit 1
+    mkdir -p "%{_localstatedir}/data" || exit 1
+    mv "%{_localstatedir}/packages_files/manager_tzdb_backup" "%{_localstatedir}/data/tzdb" || exit 1
+  fi
+fi
+
 if [ -f %{_sysconfdir}/systemd/system/wazuh-manager.service ]; then
   rm -rf %{_sysconfdir}/systemd/system/wazuh-manager.service
   systemctl daemon-reload > /dev/null 2>&1
@@ -483,9 +579,16 @@ fi
 rm -rf %{_localstatedir}/backup/groups
 
 %triggerin -- glibc
-[ -r %{_sysconfdir}/localtime ] && cp -fpL %{_sysconfdir}/localtime %{_localstatedir}/etc
- chown root:wazuh-manager %{_localstatedir}/etc/localtime
- chmod 0640 %{_localstatedir}/etc/localtime
+if [ ! -e %{_localstatedir}/etc/localtime ] && [ -r %{_sysconfdir}/localtime ]; then
+  cp -fpL %{_sysconfdir}/localtime %{_localstatedir}/etc
+  chown root:wazuh-manager %{_localstatedir}/etc/localtime
+  chmod 0640 %{_localstatedir}/etc/localtime
+fi
+if [ ! -e %{_localstatedir}/etc/TIMEZONE ] && [ -r %{_sysconfdir}/TIMEZONE ]; then
+  cp -fp %{_sysconfdir}/TIMEZONE %{_localstatedir}/etc
+  chown root:root %{_localstatedir}/etc/TIMEZONE
+  chmod 0640 %{_localstatedir}/etc/TIMEZONE
+fi
 
 %clean
 rm -fr %{buildroot}
@@ -524,19 +627,19 @@ rm -fr %{buildroot}
 %attr(750, root, wazuh-manager) %{_localstatedir}/bin/rbac_control
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-manager-keystore
 %dir %attr(770, root, wazuh-manager) %{_localstatedir}/etc
-%attr(660, root, wazuh-manager) %ghost %{_localstatedir}/etc/wazuh-manager.conf
+%attr(660, root, wazuh-manager) %config(noreplace) %ghost %{_localstatedir}/etc/wazuh-manager.conf
 %attr(640, root, root) %ghost %{_localstatedir}/etc/sslmanager.cert
 %attr(640, root, root) %ghost %{_localstatedir}/etc/sslmanager.key
 %attr(660, wazuh-manager, wazuh-manager) %config(noreplace) %{_localstatedir}/etc/client.keys
 %attr(640, root, wazuh-manager) %config(noreplace) %{_localstatedir}/etc/wazuh-manager-internal-options.conf
-%attr(640, root, wazuh-manager) %{_localstatedir}/etc/localtime
+%attr(640, root, wazuh-manager) %ghost %{_localstatedir}/etc/localtime
 %dir %attr(770, root, wazuh-manager) %{_localstatedir}/etc/shared
 %dir %attr(770, wazuh-manager, wazuh-manager) %{_localstatedir}/etc/shared/default
-%attr(660, wazuh-manager, wazuh-manager) %{_localstatedir}/etc/shared/agent-template.conf
+%attr(660, wazuh-manager, wazuh-manager) %config(noreplace) %{_localstatedir}/etc/shared/agent-template.conf
 %attr(660, wazuh-manager, wazuh-manager) %config(noreplace) %{_localstatedir}/etc/shared/default/*
 %dir %attr(750, wazuh-manager, wazuh-manager) %{_localstatedir}/etc/outputs
 %dir %attr(750, wazuh-manager, wazuh-manager) %{_localstatedir}/etc/outputs/default
-%attr(640, wazuh-manager, wazuh-manager) %{_localstatedir}/etc/outputs/default/*.yml
+%attr(640, wazuh-manager, wazuh-manager) %config(noreplace) %{_localstatedir}/etc/outputs/default/*.yml
 %dir %attr(750, root, wazuh-manager) %{_localstatedir}/framework
 %dir %attr(750, root, wazuh-manager) %{_localstatedir}/framework/python
 %{_localstatedir}/framework/python/*
@@ -573,20 +676,20 @@ rm -fr %{buildroot}
 %dir %attr(750, wazuh-manager, wazuh-manager) %{_localstatedir}/logs/api
 %dir %attr(750, wazuh-manager, wazuh-manager) %{_localstatedir}/logs/cluster
 %dir %attr(750, wazuh-manager, wazuh-manager) %{_localstatedir}/logs/wazuh
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts
-%attr(440, wazuh-manager, wazuh-manager) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/VERSION.json
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/src/
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/src/init/
-%attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/src/init/*
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/generic
-%attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/generic/*
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/centos
-%attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/centos/*
-%dir %attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/rhel
-%attr(750, root, root) %config(missingok) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/rhel/*
+%dir %attr(750, root, root) %{_localstatedir}/packages_files
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts
+%attr(440, wazuh-manager, wazuh-manager) %{_localstatedir}/packages_files/manager_installation_scripts/VERSION.json
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/src/
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/src/init/
+%attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/src/init/*
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/generic
+%attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/generic/*
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/centos
+%attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/centos/*
+%dir %attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/rhel
+%attr(750, root, root) %{_localstatedir}/packages_files/manager_installation_scripts/etc/templates/config/rhel/*
 %dir %attr(770, wazuh-manager, wazuh-manager) %{_localstatedir}/queue
 %attr(660, wazuh-manager, wazuh-manager) %{_localstatedir}/queue/agents-timestamp
 %dir %attr(770, wazuh-manager, wazuh-manager) %{_localstatedir}/queue/alerts

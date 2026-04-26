@@ -21,6 +21,8 @@ case "$1" in
     GROUP="wazuh-manager"
     WAZUH_GLOBAL_TMP_DIR="${DIR}/packages_files"
     WAZUH_TMP_DIR="${WAZUH_GLOBAL_TMP_DIR}/manager_config_files"
+    WAZUH_DATA_TMP_DIR="${WAZUH_TMP_DIR}/data_preserve"
+    WAZUH_TZDB_TMP_DIR="${WAZUH_TMP_DIR}/tzdb_backup"
     OSMYSHELL="/sbin/nologin"
     SCRIPTS_DIR="${WAZUH_GLOBAL_TMP_DIR}/manager_installation_scripts"
 
@@ -58,9 +60,15 @@ case "$1" in
             fi
         fi
     else
-        ${SCRIPTS_DIR}/src/init/gen_wazuh.sh conf manager ${OS} ${VER} ${DIR} > ${DIR}/etc/wazuh-manager.conf.new
-        chown root:${GROUP} ${DIR}/etc/wazuh-manager.conf.new
-        chmod 660 ${DIR}/etc/wazuh-manager.conf.new
+        rm -f ${DIR}/etc/wazuh-manager.conf.dpkg-dist
+        ${SCRIPTS_DIR}/src/init/gen_wazuh.sh conf manager ${OS} ${VER} ${DIR} > ${DIR}/etc/wazuh-manager.conf.dpkg-dist
+        chown root:${GROUP} ${DIR}/etc/wazuh-manager.conf.dpkg-dist
+        chmod 660 ${DIR}/etc/wazuh-manager.conf.dpkg-dist
+        if [ -f ${DIR}/etc/wazuh-manager.conf ] && cmp -s ${DIR}/etc/wazuh-manager.conf ${DIR}/etc/wazuh-manager.conf.dpkg-dist; then
+            rm -f ${DIR}/etc/wazuh-manager.conf.dpkg-dist
+        else
+            echo "Preserved existing ${DIR}/etc/wazuh-manager.conf. Review new defaults in ${DIR}/etc/wazuh-manager.conf.dpkg-dist."
+        fi
     fi
 
     # Remove/relocate existing SQLite databases
@@ -108,29 +116,20 @@ case "$1" in
     chmod 640 ${DIR}/etc/sslmanager.cert ${DIR}/etc/sslmanager.key > /dev/null 2>&1 || true
 
     # For the etc dir
-    if [ -f /etc/localtime ]; then
+    if [ -f /etc/localtime ] && [ ! -e ${DIR}/etc/localtime ]; then
         cp -pL /etc/localtime ${DIR}/etc/;
         chmod 640 ${DIR}/etc/localtime
         chown root:${GROUP} ${DIR}/etc/localtime
     fi
 
-    if [ -f /etc/TIMEZONE ]; then
+    if [ -f /etc/TIMEZONE ] && [ ! -e ${DIR}/etc/TIMEZONE ]; then
         cp -p /etc/TIMEZONE ${DIR}/etc/;
         chmod 640 ${DIR}/etc/TIMEZONE
         chown root:root ${DIR}/etc/TIMEZONE
     fi
 
-    # Restore client.keys configuration
-    if [ -f ${WAZUH_TMP_DIR}/client.keys ]; then
-        mv ${WAZUH_TMP_DIR}/client.keys ${DIR}/etc/client.keys
-    fi
-    # Restore manager internal options configuration
-    if [ -f ${WAZUH_TMP_DIR}/wazuh-manager-internal-options.conf ]; then
-        mv ${WAZUH_TMP_DIR}/wazuh-manager-internal-options.conf ${DIR}/etc/wazuh-manager-internal-options.conf
-    fi
-
     # Restore wazuh-manager.conf configuration
-    if [ -f ${WAZUH_TMP_DIR}/wazuh-manager.conf ]; then
+    if [ -f ${WAZUH_TMP_DIR}/wazuh-manager.conf ] && [ ! -f ${DIR}/etc/wazuh-manager.conf ]; then
         mv ${WAZUH_TMP_DIR}/wazuh-manager.conf ${DIR}/etc/wazuh-manager.conf
     fi
 
@@ -159,10 +158,28 @@ case "$1" in
     chmod 660 ${DIR}/etc/wazuh-manager.conf > /dev/null 2>&1 || true
     chown root:${GROUP} ${DIR}/etc/wazuh-manager-internal-options.conf > /dev/null 2>&1 || true
     chmod 640 ${DIR}/etc/wazuh-manager-internal-options.conf > /dev/null 2>&1 || true
-    # Restore group files
-    if [ -d ${WAZUH_TMP_DIR}/group ]; then
-        cp -rfp ${WAZUH_TMP_DIR}/group/* ${DIR}/etc/shared
-        rm -rf ${WAZUH_TMP_DIR}/group/
+
+    # Restore preserved runtime data except data/tzdb, which is package-managed.
+    if [ -d "${WAZUH_DATA_TMP_DIR}" ]; then
+        mkdir -p "${DIR}/data"
+        for item in "${WAZUH_DATA_TMP_DIR}"/* "${WAZUH_DATA_TMP_DIR}"/.[!.]* "${WAZUH_DATA_TMP_DIR}"/..?*; do
+            [ -e "${item}" ] || [ -L "${item}" ] || continue
+            base=$(basename "${item}")
+            [ "${base}" = "tzdb" ] && continue
+            rm -rf "${DIR}/data/${base}"
+            cp -a "${item}" "${DIR}/data/"
+        done
+        rm -rf "${WAZUH_DATA_TMP_DIR}"
+    fi
+
+    if [ -d "${DIR}/data/tzdb/iana" ] && [ -f "${DIR}/data/tzdb/iana/version" ]; then
+        rm -rf "${WAZUH_TZDB_TMP_DIR}"
+        rm -f "${WAZUH_TMP_DIR}/tzdb_backup_prepared"
+    elif [ -e "${WAZUH_TZDB_TMP_DIR}" ] || [ -L "${WAZUH_TZDB_TMP_DIR}" ]; then
+        rm -rf "${DIR}/data/tzdb"
+        mkdir -p "${DIR}/data"
+        mv "${WAZUH_TZDB_TMP_DIR}" "${DIR}/data/tzdb"
+        rm -f "${WAZUH_TMP_DIR}/tzdb_backup_prepared"
     fi
 
     # Restore agent-groups files
@@ -204,8 +221,15 @@ case "$1" in
         fi
     fi
 
-    # Restoring file permissions
-    ${SCRIPTS_DIR}/restore-permissions.sh > /dev/null 2>&1 || true
+    # Restoring file permissions. Fresh installs can apply the full packaged
+    # baseline; upgrades must not reset preserved local etc/ or non-TZDB data.
+    if [ -z "$2" ]; then
+        ${SCRIPTS_DIR}/restore-permissions.sh > /dev/null 2>&1 || true
+    elif [ -x "${SCRIPTS_DIR}/restore-permissions-preserve-safe.sh" ]; then
+        ${SCRIPTS_DIR}/restore-permissions-preserve-safe.sh > /dev/null 2>&1 || true
+    else
+        echo "Warning: restore-permissions-preserve-safe.sh not found; skipping preserved path permission restore." >&2
+    fi
 
     # Remove old service file /etc/systemd/system/wazuh-manager.service if present
     if [ -f /etc/systemd/system/wazuh-manager.service ]; then
