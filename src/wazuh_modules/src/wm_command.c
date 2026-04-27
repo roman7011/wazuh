@@ -279,10 +279,24 @@ void * wm_command_main(wm_command_t * command) {
 
             if (proc_path && proc_path[0]) {
                 const char *slash = strrchr(proc_path, '/');
-                proc_name = slash ? (slash + 1) : proc_path;
+                const char *backslash = strrchr(proc_path, '\\');
+                const char *separator = slash;
+
+                if (backslash && (!separator || backslash > separator)) {
+                    separator = backslash;
+                }
+
+                proc_name = separator ? (separator + 1) : proc_path;
             } else if (proc_argv0 && proc_argv0[0]) {
                 const char *slash = strrchr(proc_argv0, '/');
-                proc_name = slash ? (slash + 1) : proc_argv0;
+                const char *backslash = strrchr(proc_argv0, '\\');
+                const char *separator = slash;
+
+                if (backslash && (!separator || backslash > separator)) {
+                    separator = backslash;
+                }
+
+                proc_name = separator ? (separator + 1) : proc_argv0;
             }
 
             bool include_env_vars = true;
