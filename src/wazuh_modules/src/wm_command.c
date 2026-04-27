@@ -332,7 +332,7 @@ rebuild_event_payload:
                     cJSON *process_args = NULL;
                     cJSON *process_io = NULL;
 
-                    cJSON_AddStringToObject(base_event, "event.module", "wazuh-woodle-cmd");
+                    cJSON_AddStringToObject(base_event, "event.module", "wazuh-wodle-cmd");
                     cJSON_AddStringToObject(base_event, "event.start", event_start);
                     if (command->tag) {
                         cJSON_AddStringToObject(base_event, "tags", command->tag);
